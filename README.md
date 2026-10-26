@@ -30,13 +30,6 @@ They differ only in the flags below.
 Always pass `--norm1_type ""`: its default is `layer`, which would add a LayerNorm before every
 hidden layer.
 
-### Architecture
-
-![BasisTabM variants](basistabm_variants.png)
-
-Panels (B)–(D) correspond to NoFB, FB and FBMix; the dashed box in (D) marks where FBMixNorm adds
-BatchNorm. The figure source is `basistabm_variants.tex` (TikZ).
-
 ## Repository structure
 
 ```
