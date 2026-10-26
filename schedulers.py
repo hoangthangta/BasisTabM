@@ -66,7 +66,7 @@ class CustomOneCycleLR(_LRScheduler):
             factor = fraction
         return start + (end - start) * factor
 
-    def get_lr(self):
+    '''def get_lr(self):
         step = min(self.last_epoch, self.total_steps - 1)
         up = self.step_size_up
         down_end = up + self.step_size_down
@@ -96,15 +96,53 @@ class CustomOneCycleLR(_LRScheduler):
         if step >= self.total_steps - 1:
             return self.final_lrs
 
+        return self.initial_lrs'''
+
+    def get_lr(self):
+        step = min(self.last_epoch, self.total_steps - 1)
+        up = self.step_size_up
+        down_end = up + self.step_size_down
+        annihilation_start = self.total_steps - self.annihilation_steps
+
+        if step >= self.total_steps - 1:
+            return self.final_lrs
+
+        if step < up:
+            return [self._anneal(base, self.max_lr, step / max(1, up))
+                    for base in self.initial_lrs]
+
+        if step < down_end:
+            return [self._anneal(self.max_lr, base, (step - up) / max(1, self.step_size_down))
+                    for base in self.initial_lrs]
+
+        if self.annihilation_steps:
+            fraction = (step - annihilation_start) / self.annihilation_steps
+            return [self._anneal(base, final, fraction)
+                    for base, final in zip(self.initial_lrs, self.final_lrs)]
+
         return self.initial_lrs
 
-    def get_momentum(self):
+    '''def get_momentum(self):
         step = min(self.last_epoch, self.total_steps - 1)
         fraction = min(1.0, step / max(1, self.step_size_up))
         momentum = (
             self.momentum_range[1]
             - fraction * (self.momentum_range[1] - self.momentum_range[0])
         )
+        return [momentum for _ in self.optimizer.param_groups]'''
+    
+    def get_momentum(self):
+        step = min(self.last_epoch, self.total_steps - 1)
+        low, high = self.momentum_range
+        up = self.step_size_up
+
+        if step < up:
+            fraction = step / max(1, up)
+            momentum = high + (low - high) * fraction
+        else:
+            fraction = min(1.0, (step - up) / max(1, self.total_steps - up))
+            momentum = low + (high - low) * fraction
+
         return [momentum for _ in self.optimizer.param_groups]
 
     def step(self, epoch=None):
