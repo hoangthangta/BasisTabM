@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # ===================================================================================================
 # Weather (OT, univariate), multi-output: lookback L=96, horizon H=96 (16 h ahead).
-# 73 configs x 3 seeds (0, 1, 2) = 219 runs.
-# MLP and BSRBF-KAN with norm = none / layer / batch.
+# ALL experiments in one script: 74 configs x 3 seeds (0, 1, 2) = 222 runs.
+#   (merged from run_weather_L96_H96_all.sh, run_weather_L96_H96_nofb_fb_norm.sh and
+#    run_weather_L96_H96_dlinear.sh; the NoFB/FB+Norm runs were already in *_all.sh, so they appear once)
+#
+# Baselines:
+#   MLP (norm = none / layer / batch), EfficientKAN, BSRBF-KAN (norm = none / layer / batch),
+#   PatchTST, DLinear (kernel 25, 18,624 params; lightweight reference, NOT budget-matched),
+#   TabM (k = 2, 4, 8, 16, 32; dropout 0.0)
+# BasisTabM: 12 variants x k = 2..32 = 60 configs (all: random-sign BatchEnsemble adapters, no norm1):
+#   NoFB      (note *_nofb_k*_n2none)            : no basis at all             --basis_mode none --no-feature_basis
+#   NoFBNorm  (note *_nofb_k*_n2batch|n2layer)   : NoFB + BatchNorm / LayerNorm (norm2)
+#   NoFBMix   (note *_nofb_mix_*_n2none)         : basis branch only           --basis_mode mix --no-feature_basis
+#   NoFBMixNorm (note *_nofb_mix_*_n2batch|n2layer): NoFBMix + BatchNorm / LayerNorm (norm2)
+#   FB        (note *_fb_k*_n2none)              : input feature basis         --basis_mode none
+#   FBNorm    (note *_fb_k*_n2batch|n2layer)     : FB + BatchNorm / LayerNorm (norm2)
+#   FBMix     (note *_fbmix_*_n2none)            : FB + basis branch in every layer --basis_mode mix
+#   FBMixNorm (note *_fbmix_*_n2batch|n2layer)   : FBMix + BatchNorm / LayerNorm (norm2)
+# All models except DLinear match the MLP budget (~50,208 params, within +-0.5%).
+# Training: 50 epochs, AdamW, OneCycleLR, batch size 64 (16 for PatchTST), no AMP (--no_amp).
 # Output: output/weather/<model>/<file>__<note>__s<seed>.*   (note = L96_H96_mo_<config>;
 #         run_weather.py appends __s<seed> itself, so the seed is not in the note)
-#
-# BasisTabM variants (all: random-sign BatchEnsemble adapters, no norm1):
-#   NoFB      (note *_nofb_k*)         : no basis at all             --basis_mode none --no-feature_basis
-#   NoFBMix   (note *_nofb_mix_*_n2none)        : basis branch only  --basis_mode mix --no-feature_basis
-#   NoFBMixNorm (note *_nofb_mix_*_n2batch|n2layer): NoFBMix + BatchNorm / LayerNorm (norm2)
-#   FB        (note *_fb_*)            : input feature basis         --basis_mode none
-#   FBMix     (note *_fbmix_*_n2none)  : FB + basis branch per layer --basis_mode mix
-#   FBMixNorm (note *_fbmix_*_n2batch) : FBMix + BatchNorm (norm2)   --basis_mode mix --norm2_type batch
-#   FBMixNorm (note *_fbmix_*_n2layer) : FBMix + LayerNorm (norm2)   [extra ablation]
-#   NoFBNorm  (note *_nofb_k*_n2batch|n2layer) : NoFB + BatchNorm / LayerNorm (norm2)
-#   FBNorm    (note *_fb_k*_n2batch|n2layer)   : FB + BatchNorm / LayerNorm (norm2)
-# All BasisTabM models match the MLP budget (~50,208 params, within +-0.5%).
 # ====================================================================================================
 
 set -u
@@ -58,6 +63,11 @@ for seed in 0 1 2; do
     # ===== PatchTST =====
     # patchtst — 50200 params
     python run_weather.py --model "patchtst" --target "OT" --lookback 96 --horizon 96 --multi_output --batch_size 16 --patch_len 16 --stride 8 --d_model 28 --n_heads 4 --e_layers 2 --d_ff 90 --epochs 50 --scheduler "OneCycleLR" --seed "$seed" --note "L96_H96_mo_pl16_st8_dm28_ff90" --overwrite --no_amp
+    sleep 5s;
+
+    # ===== DLinear =====
+    # dlinear, kernel=25 — 18624 params
+    python run_weather.py --model "dlinear" --target "OT" --lookback 96 --horizon 96 --multi_output --ma_kernel 25 --dlinear_individual 0 --batch_size 64 --epochs 50 --scheduler "OneCycleLR" --seed "$seed" --note "L96_H96_mo_dlinear_ma25" --overwrite --no_amp
     sleep 5s;
 
     # ===== TabM (k = 2, 4, 8, 16, 32) =====
