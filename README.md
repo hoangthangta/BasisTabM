@@ -1,23 +1,6 @@
 # BasisTabM
 
-**A TabM-style ensemble with learnable basis functions for time series forecasting.**
-
-BasisTabM is a BatchEnsemble/TabM network (k members sharing one set of weights, each with its own
-random-sign adapters) extended with Kolmogorov–Arnold-style basis functions:
-
-1. an **input feature basis (FB)**: every input feature first passes through its own learnable
-   1-D function $u_i = x_i + \sum_{g} c_{ig}\,\phi_g(x_i)$ (Gaussian RBFs, coefficients initialized at 0),
-   applied once before the input is expanded to the k members;
-2. optionally, an **α-mixed basis branch (Mix) in every layer**, which reuses the shared weight $W$ and is
-   mixed with the linear path by a learnable per-member weight $\alpha$ (initialized at 0):
-   $h = (1-\alpha)\,h_{\text{lin}} + \alpha\, W \sum_g \phi_g(x)$;
-3. optionally, a **normalization after the hidden layer** (`norm2`): BatchNorm with separate
-   statistics per member, or LayerNorm.
-
-Each of the k members is trained on the target with its own loss; the prediction is the mean of
-the members. The repository benchmarks BasisTabM against MLP, EfficientKAN, BSRBF-KAN, TabM,
-DLinear and PatchTST on two forecasting tasks, with **matched parameter budgets** within each
-setting (DLinear is a lightweight reference and is not budget-matched).
+BasisTabM is a TabM-style ensemble for time series forecasting that adds learnable Kolmogorov–Arnold-style basis functions. These are zero-initialized RBF functions on each input feature, plus an optional α-mixed basis branch per layer and optional per-member normalization. Members are trained with separate losses and averaged at prediction time. 
 
 ## Model variants
 
@@ -85,32 +68,21 @@ Both datasets are downloaded automatically on first run:
 | Parameter budget | ≈ 93.6K | ≈ 50.2K |
 | Mixed precision | fp16 AMP on GPU | off (`--no_amp`) |
 
-Notes:
-- **Bike calendar features** (hour, weekday and month as sin/cos, `holiday`, `workingday`) describe the
-  lookback hours only; no information about the forecast hours is given to the models.
-- **Weather is univariate** (OT → OT, i.e. TSLib `--features S`). It is not the usual multivariate
-  Weather benchmark (`--features M`), so the numbers are not directly comparable with those tables.
-  One duplicated timestamp and the sensor error code (−9999) records are removed.
-- **DLinear** uses a moving-average kernel of 25. On Bike it is run in three versions:
-  `univariate` (`cnt` only), `mix` (all 14 channels, shared linear layers) and `mix` with
-  `--dlinear_individual 1` (per-channel linear layers); both mix versions map the channel
-  forecasts to `cnt` with a learned channel-mixing layer (`--dlinear_exog mix`), as for PatchTST.
-- **TabM** is built with `tabm.TabM.make(...)`; `--dropout` is passed explicitly (0.0 in all
-  reported runs) because the library default is 0.1.
+**Notes**
+- **Bike:** calendar features (sin/cos hour, weekday, month; `holiday`, `workingday`) cover lookback hours only, never the forecast hours.
+- **Weather** is univariate (OT → OT, `--features S`), not the standard multivariate benchmark, so results aren't directly comparable. A duplicated timestamp and −9999 error records are removed.
+- **DLinear** (kernel 25) has three Bike versions: `univariate` (`cnt` only), `mix` (14 channels, shared layers) and `mix` + `--dlinear_individual 1` (per-channel layers). Mix versions map to `cnt` via a learned mixing layer (`--dlinear_exog mix`), as PatchTST does.
+- **TabM** uses `tabm.TabM.make(...)` with dropout 0.0 (library default: 0.1).
 
 **Protocol (both tasks)**
-- Splits are chronological; scalers are fit on the training period only.
-- Windows that cross missing or non-consecutive timestamps are skipped, not imputed; windows whose
-  targets straddle a split boundary are discarded.
-- Optimizer: AdamW (lr 1e-3, weight decay 1e-4), batch size 64 (16 for PatchTST), 50 epochs in all
-  reported experiments (the script default is 30).
-- Scheduler: OneCycle with cosine warm-up (30%) and cool-down (peak = `--lr`, start = lr/25),
-  then a final 10% annihilation phase towards lr/(25·10⁴); the AdamW β₁ moves between 0.95 and 0.85.
-- The checkpoint with the lowest validation RMSE is evaluated on the test set.
-- Metrics: RMSE, MAE and R² on the original target scale, over all forecast steps (Weather also
-  reports MSE/MAE on the normalized scale). Bike predictions are clipped at zero.
-- Naive baselines on the same test targets: persistence and seasonal naive at 24 h and 168 h.
-- Every configuration is run with seeds 0, 1 and 2; results are reported as mean ± std.
+- Chronological splits; scalers fit on training data only.
+- Windows crossing missing or non-consecutive timestamps are skipped (not imputed); windows with targets straddling a split boundary are discarded.
+- AdamW (lr 1e-3, weight decay 1e-4), batch size 64 (16 for PatchTST), 50 epochs (script default: 30).
+- OneCycle: 30% cosine warm-up from lr/25 to `--lr`, cool-down, then a 10% annihilation to lr/(25·10⁴); β₁ cycles 0.95–0.85.
+- The best-validation-RMSE checkpoint is tested.
+- Metrics: RMSE, MAE, R² on the original scale over all steps (plus normalized MSE/MAE for Weather); Bike predictions clipped at zero.
+- Naive baselines: persistence and seasonal naive (24 h, 168 h).
+- Seeds 0–2; mean ± std reported.
 
 ## Using BasisTabM
 
