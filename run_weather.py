@@ -17,6 +17,7 @@ from models.efficient_kan import EfficientKAN
 from models.bsrbf_kan import BSRBF_KAN
 from models.basis_tabm import BasisTabM
 from models.patchtst_model import PatchTSTModel
+from models.dlinear import DLinear
 
 from schedulers import get_scheduler
 from utils import set_seed, count_params
@@ -24,6 +25,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 SENTINEL_THRESHOLD = -9990.0  # MPI Weather uses -9999 for invalid sensor readings
 ENSEMBLE_MODELS = {"tabm", "basis_tabm"}
+SEQUENCE_MODELS = {"patchtst", "dlinear"}   # take the (B, L, C) window directly; ignore calendar inputs
 
 # Forecasting protocols:
 #   Default         : predict the single value at t + horizon (out_len=1).
@@ -50,7 +52,8 @@ class WeatherModel(nn.Module):
 
     def forward(self, x, calendar):
         batch, H = x.shape[0], self.out_len
-        if self.model_type == "patchtst":
+        if self.model_type in SEQUENCE_MODELS:
+            # PatchTST / DLinear: (B, L, 1) -> (B, out_len, 1) or (B, out_len)
             return self._as_matrix(self.model(x), batch)
         
         inp = torch.cat([x.flatten(1), calendar], dim=1)
@@ -298,8 +301,8 @@ def get_dataloaders(args):
     print(f"Forecast mode: {mode}")
     print(f"Input: one historical variable ({args.target}); calendar at first target step: "
           f"{calendar_cols if calendar_cols else 'none'}")
-    if args.model == "patchtst" and calendar_cols:
-        print("Note: PatchTST does not use calendar inputs; use --calendar none for a like-for-like comparison.")
+    if args.model in SEQUENCE_MODELS and calendar_cols:
+        print(f"Note: {args.model} does not use calendar inputs; use --calendar none for a like-for-like comparison.")
     print(f"Chronological split (fixed on original rows): train < {train_end_ts}, "
           f"val [{train_end_ts}, {val_end_ts}), test >= {val_end_ts}")
     print(f"Skipped {n_candidates - len(target_idx):,} candidate windows crossing missing/non-consecutive timestamps.")
@@ -354,6 +357,10 @@ def build_model(args, n_features, input_dim, n_calendar):
                         num_grids=args.basis_grids or None, ensemble_init=args.ensemble_init,
                         alpha_mode=args.alpha_mode, basis_agg=args.basis_agg, basis_mode=args.basis_mode,
                         feature_basis=args.feature_basis, feature_grids=args.feature_grids)
+    elif args.model == "dlinear":
+        # Univariate input (n_features = 1), so --dlinear_individual has no effect here.
+        net = DLinear(seq_len=args.lookback, pred_len=H_out, n_channels=n_features,
+                      kernel_size=args.ma_kernel, individual=bool(args.dlinear_individual))
     else: raise ValueError(args.model)
     return WeatherModel(net, args.model, n_calendar, H_out)
 
@@ -612,14 +619,16 @@ def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_st
         + (f"BasisTabM: k={args.tabm_k}, ensemble_init={args.ensemble_init}, basis_mode={args.basis_mode}, "
            f"feature_basis={args.feature_basis} (grids={args.feature_grids}, range=+-{args.grid_range}, "
            f"basis={args.basis}), norm1={args.norm1_type or 'none'}, norm2={args.norm2_type or 'none'}\n"
-           if args.model == "basis_tabm" else "") +
+           if args.model == "basis_tabm" else "")
+        + (f"DLinear: moving-average kernel={args.ma_kernel}, individual={bool(args.dlinear_individual)}\n"
+           if args.model == "dlinear" else "") +
         f"Forecast mode: {mode_desc}\n"
         f"Lookback: {args.lookback} steps ({args.lookback * 10} minutes)\n"
         f"Forecast horizon: {h} step(s) ({h * 10} minutes ahead)\n"
         f"Chronological split: 70%/10%/20% (boundaries fixed on original rows before sentinel removal); "
         f"a window belongs to a split only if all its target steps do\n"
         f"Historical input: univariate target series only; calendar covariates at first target step: {cal_desc}"
-        + (" (not used by PatchTST)" if args.model == "patchtst" and calendar_cols else "") + "\n"
+        + (f" (not used by {args.model})" if args.model in SEQUENCE_MODELS and calendar_cols else "") + "\n"
         f"Target scaling: train-only z-score (mean={y_mean:.8f}, std={y_std:.8f})\n"
         f"Epochs: {args.epochs}\nBatch size: {args.batch_size}\nScheduler: {args.scheduler}\n"
         f"LR: {args.lr}\nWeight decay: {args.weight_decay}\nDropout: {args.dropout}\n"
@@ -639,7 +648,7 @@ def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_st
 def get_args():
     p = argparse.ArgumentParser(description="Univariate Weather forecasting with chronological train/validation/test splits.")
     p.add_argument("--model", default="mlp",
-        choices=["mlp", "efficient_kan", "basis_tabm", "tabm", "bsrbf_kan", "patchtst"])
+        choices=["mlp", "efficient_kan", "basis_tabm", "tabm", "bsrbf_kan", "patchtst", "dlinear"])
     p.add_argument("--data_path", default="data/weather.csv")
     p.add_argument("--target", default="OT", help="Single Weather column to forecast (default: OT).")
     p.add_argument("--note", default="run_0", help="Unique output tag; must not be empty")
@@ -700,6 +709,11 @@ def get_args():
     p.add_argument("--affine", type=int, default=0)
     p.add_argument("--padding_patch", type=str, default="end")
 
+    # DLinear
+    p.add_argument("--ma_kernel", type=int, default=25, help="DLinear moving-average kernel (odd)")
+    p.add_argument("--dlinear_individual", type=int, default=0,
+                   help="1 = separate linear layers per channel (no effect for univariate input)")
+
     return p.parse_args()
 
 
@@ -723,6 +737,8 @@ def main():
             raise ValueError("--patch_len must be in [1, --lookback].")
         if args.stride < 1:
             raise ValueError("--stride must be positive.")
+    if args.model == "dlinear" and (args.ma_kernel < 1 or args.ma_kernel % 2 == 0):
+        raise ValueError("--ma_kernel must be a positive odd integer.")
     # Number of values each model outputs per window.
     args.out_len = args.horizon if args.multi_output else 1
 

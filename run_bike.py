@@ -17,6 +17,7 @@ from models.efficient_kan import EfficientKAN
 from models.bsrbf_kan import BSRBF_KAN
 from models.basis_tabm import BasisTabM
 from models.patchtst_model import PatchTSTModel
+from models.dlinear import DLinear
 
 from schedulers import get_scheduler
 from utils import set_seed, count_params
@@ -38,25 +39,26 @@ def add_calendar_columns(df):
     return df
 
 ENSEMBLE_MODELS = {"tabm", "basis_tabm"}
+SEQUENCE_MODELS = {"patchtst", "dlinear"}   # take the (B, L, C) window and forecast every channel
 
 
 class BikeModel(nn.Module):
     """Output shapes: [B, H] for single models; [B, k, H] for ensembles.
 
-    PatchTST (--patchtst_exog):
+    PatchTST / DLinear (--patchtst_exog / --dlinear_exog):
       univariate : use only cnt; ignore exogenous features.
       mix        : use all channels; learn a linear mapping to cnt, initialized
                    to select cnt only (equivalent to univariate at initialization).
     """
 
-    def __init__(self, model, model_type, n_features, horizon, k=1, patchtst_exog="univariate"):
+    def __init__(self, model, model_type, n_features, horizon, k=1, exog="univariate"):
         super().__init__()
         self.model, self.model_type = model, model_type
         self.n_features, self.horizon, self.k = n_features, horizon, k
         self.is_ensemble = model_type in ENSEMBLE_MODELS
-        self.patchtst_exog = patchtst_exog
+        self.exog = exog
         self.mix = None
-        if model_type == "patchtst" and patchtst_exog == "mix":
+        if model_type in SEQUENCE_MODELS and exog == "mix":
             self.mix = nn.Linear(n_features, 1)
             with torch.no_grad():
                 self.mix.weight.zero_()
@@ -65,17 +67,17 @@ class BikeModel(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-        if self.model_type == "patchtst":
-            if self.patchtst_exog == "univariate":
+        if self.model_type in SEQUENCE_MODELS:
+            if self.exog == "univariate":
                 x = x[:, :, -1:]  # cnt channel only
             C = x.shape[2]
             out = self.model(x)
             # PatchTSTModel squeezes the channel dim when C == 1 -> restore [B, horizon, 1].
             if C == 1 and out.ndim == 2:
                 out = out.unsqueeze(-1)
-            # Expected PatchTST output: [B, horizon, C] (channel-independent forecast).
+            # Expected output: [B, horizon, C] (one forecast per channel).
             if out.ndim != 3 or out.shape[1] != self.horizon or out.shape[2] != C:
-                raise RuntimeError(f"PatchTST output shape {tuple(out.shape)} != "
+                raise RuntimeError(f"{self.model_type} output shape {tuple(out.shape)} != "
                                    f"[B, {self.horizon}, {C}]")
             if self.mix is None:
                 return out[:, :, -1]
@@ -197,9 +199,10 @@ def build_model(args, n_features, input_dim):
     elif args.model == "tabm":
         if len(set(hidden)) != 1:
             raise ValueError("TabM needs equal widths in --hidden_layers.")
+        # dropout passed explicitly so TabM does not fall back to the library default (0.1).
         net = tabm.TabM.make(n_num_features=input_dim, cat_cardinalities=[], d_out=H,
                              d_block=hidden[0], n_blocks=len(hidden), k=args.tabm_k,
-                             num_embeddings=None)
+                             dropout=args.dropout, num_embeddings=None)
     elif args.model == "basis_tabm":
         net = BasisTabM(net_layers=layers, k=args.tabm_k, basis=args.basis,
                         grid_min=-args.grid_range, grid_max=args.grid_range,
@@ -226,8 +229,13 @@ def build_model(args, n_features, input_dim):
             affine=bool(args.affine),
             padding_patch=args.padding_patch,
         )
+    elif args.model == "dlinear":
+        net = DLinear(seq_len=args.lookback, pred_len=H,
+                      n_channels=1 if args.dlinear_exog == "univariate" else n_features,
+                      kernel_size=args.ma_kernel, individual=bool(args.dlinear_individual))
     else: raise ValueError(args.model)
-    return BikeModel(net, args.model, n_features, H, k=args.tabm_k, patchtst_exog=args.patchtst_exog)
+    exog = args.dlinear_exog if args.model == "dlinear" else args.patchtst_exog
+    return BikeModel(net, args.model, n_features, H, k=args.tabm_k, exog=exog)
 
 
 def ensemble_loss_and_pred(model, pred, y, criterion):
@@ -282,13 +290,26 @@ def evaluate(model, loader, criterion, y_mean, y_std):
             "y_true": y_true, "y_pred": y_pred}
 
 
-def patchtst_input_note(args):
-    if args.model != "patchtst":
+def sequence_input_note(args, model_name):
+    """Input description for PatchTST / DLinear (n/a for the other models)."""
+    if args.model != model_name:
         return "n/a"
-    if args.patchtst_exog == "univariate":
+    exog = args.dlinear_exog if model_name == "dlinear" else args.patchtst_exog
+    if exog == "univariate":
         return "univariate (cnt channel only; exogenous features not used)"
     return (f"mix (all {len(args.feature_names)} channels encoded channel-independently, "
             f"then a learned linear channel-mixing layer -> cnt)")
+
+
+def patchtst_input_note(args):
+    return sequence_input_note(args, "patchtst")
+
+
+def dlinear_input_note(args):
+    note = sequence_input_note(args, "dlinear")
+    if note == "n/a":
+        return note
+    return f"{note}; moving-average kernel={args.ma_kernel}, individual={bool(args.dlinear_individual)}"
 
 
 def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_std, test_idx, raw_y, timestamps):
@@ -296,6 +317,8 @@ def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_st
     print(f"\nModel: {args.model}\nSeed: {args.seed}\nHorizon: {H}h")
     if args.model == "patchtst":
         print(f"PatchTST input: {patchtst_input_note(args)}")
+    if args.model == "dlinear":
+        print(f"DLinear input: {dlinear_input_note(args)}")
     model = model.to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -426,6 +449,7 @@ def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_st
         f"Input features ({len(args.feature_names)}): {args.feature_names}\n"
         f"Calendar features: {'lookback hours only (' + ', '.join(CALENDAR_FEATURES) + ')' if args.calendar else 'none'}\n"
         f"PatchTST input: {patchtst_input_note(args)}\n"
+        f"DLinear input: {dlinear_input_note(args)}\n"
         f"Epochs: {args.epochs}\nBatch size: {args.batch_size}\n"
         f"Scheduler: {args.scheduler}\nLR: {args.lr}\nWeight decay: {args.weight_decay}\n"
         f"Target scaling: z-score using train mean={y_mean:.6f}, std={y_std:.6f}\n"
@@ -447,7 +471,7 @@ def train_model(model, train_loader, val_loader, test_loader, args, y_mean, y_st
 def get_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="basis_tabm",
-        choices=["mlp", "efficient_kan", "basis_tabm", "tabm", "bsrbf_kan", "patchtst"])
+        choices=["mlp", "efficient_kan", "basis_tabm", "tabm", "bsrbf_kan", "patchtst", "dlinear"])
     p.add_argument("--data_path", default="data/hour.csv")
     p.add_argument("--note", default="run_0", help="Unique output tag; must not be empty")
     p.add_argument("--overwrite", action="store_true", help="Allow overwriting outputs with the same note")
@@ -505,6 +529,14 @@ def get_args():
     p.add_argument("--affine", type=int, default=0)
     p.add_argument("--padding_patch", type=str, default="end")
 
+    # DLinear
+    p.add_argument("--dlinear_exog", default="univariate", choices=["univariate", "mix"],
+                   help="univariate: feed only cnt (original channel-independent DLinear); "
+                        "mix: feed all channels + learned linear channel mixing to cnt")
+    p.add_argument("--ma_kernel", type=int, default=25, help="DLinear moving-average kernel (odd)")
+    p.add_argument("--dlinear_individual", type=int, default=0,
+                   help="1 = separate linear layers per channel (DLinear 'individual' mode)")
+
     return p.parse_args()
 
 
@@ -526,6 +558,13 @@ def main():
     if args.model == "patchtst" and args.calendar and args.patchtst_exog == "univariate":
         raise ValueError("Univariate PatchTST ignores calendar features, so a --calendar run would be "
                          "identical to the no-calendar one. Use --patchtst_exog mix, or drop --calendar.")
+    if args.model == "dlinear":
+        if args.ma_kernel < 1 or args.ma_kernel % 2 == 0:
+            raise ValueError("--ma_kernel must be a positive odd integer.")
+        if args.calendar and args.dlinear_exog == "univariate":
+            # Allowed (unlike PatchTST) so that the univariate reference lands in the same h*_cal
+            # output folder as the other runs; the calendar channels are simply not used.
+            print("Note: univariate DLinear ignores the calendar features (cnt channel only).")
     device = torch.device("cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu")
     set_seed(args.seed, device)
     print(f"Device: {device}")
