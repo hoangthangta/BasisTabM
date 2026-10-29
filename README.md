@@ -160,13 +160,7 @@ python run_weather.py --model "basis_tabm" --target "OT" --lookback 96 --horizon
 
 ## Results
 
-Mean ± std over seeds 0, 1, 2. For each model and BasisTabM variant, the configuration with the
-lowest **mean validation RMSE** is reported (searched over normalization, k = 2, 4, 8, 16, 32 and,
-for DLinear, the input version); its test scores are shown as they are, with no test-set selection.
-RMSE and MAE are on the original scale, averaged over all forecast steps; time is the mean training
-time per run (optimization only, one RTX 3060 Ti). BN/LN: BatchNorm/LayerNorm after the hidden layer;
-`+Norm` rows pick the better of the two by validation RMSE. Best value per column in bold.
-DLinear is a lightweight reference and is not budget-matched.
+Mean ± std over seeds 0–2. For each model and BasisTabM variant, the configuration with the lowest mean validation RMSE (searched over normalization, k ∈ {2, 4, 8, 16, 32} and, for DLinear, input version) is reported; test scores are not used for selection. RMSE/MAE are on the original scale, averaged over all forecast steps. Time is the mean training time per run (one RTX 3060 Ti). BN/LN: BatchNorm/LayerNorm after the hidden layer; `+Norm` takes the better of the two by validation RMSE. Best per column in bold. DLinear is a lightweight, non-budget-matched reference.
 
 ### Bike Sharing (L = H = 24, with calendar; ≈ 93.6K parameters)
 
