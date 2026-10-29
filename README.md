@@ -132,16 +132,6 @@ Main constructor options:
 The RBF width is fixed at 1 (`use_width=False`). The input feature basis adds only
 `d_in · feature_grids + feature_grids` parameters.
 
-```python
-from models.basis_tabm import BasisTabM, ensemble_loss
-
-model = BasisTabM(net_layers=[336, 233, 24], k=4, basis_mode="mix",
-                  norm1_type="", norm2_type="batch", feature_basis=True)
-y_members = model(x)                                   # (B, k, 24)
-loss = ensemble_loss(y_members, y, task="regression")  # MSE averaged over members
-y_hat = model.predict(x, task="regression")            # mean over members
-```
-
 ## Outputs
 
 | Script | Output folder | Files |
@@ -195,6 +185,63 @@ python run_weather.py --model "basis_tabm" --target "OT" --lookback 96 --horizon
   --basis_mode "mix" --batch_size 64 --epochs 50 --scheduler "OneCycleLR" --seed 0 \
   --note "L96_H96_mo_fbmix_k2_h243_n1none_n2none" --overwrite --no_amp
 ```
+
+## Results
+
+Mean ± std over seeds 0, 1, 2. For each model and BasisTabM variant, the configuration with the
+lowest **mean validation RMSE** is reported (searched over normalization, k = 2, 4, 8, 16, 32 and,
+for DLinear, the input version); its test scores are shown as they are, with no test-set selection.
+RMSE and MAE are on the original scale, averaged over all forecast steps; time is the mean training
+time per run (optimization only, one RTX 3060 Ti). BN/LN: BatchNorm/LayerNorm after the hidden layer;
+`+Norm` rows pick the better of the two by validation RMSE. Best value per column in bold.
+DLinear is a lightweight reference and is not budget-matched.
+
+### Bike Sharing (L = H = 24, with calendar; ≈ 93.6K parameters)
+
+| Model | Config | Params | Val RMSE ↓ | Test RMSE ↓ | Test MAE ↓ | Test R² ↑ | Time (s) |
+|---|---|--:|--:|--:|--:|--:|--:|
+| MLP | no norm | 92,440 | 88.31 ± 0.30 | 93.71 ± 2.14 | 64.66 | 0.807 | 29.6 |
+| DLinear | mix, individual | 16,815 | 98.26 ± 0.18 | 94.00 ± 0.07 | 60.52 | 0.806 | 102.0 |
+| BSRBF-KAN | LN | 94,690 | 84.17 ± 1.57 | 86.42 ± 2.57 | 58.74 | 0.836 | 60.7 |
+| EfficientKAN | grid 5 | 93,600 | 80.64 ± 1.20 | 80.44 ± 1.00 | 53.68 | 0.858 | 48.9 |
+| PatchTST | P=8, S=4 | 93,629 | 85.39 ± 0.47 | 81.55 ± 0.46 | 53.72 | 0.854 | 388.4 |
+| TabM | k=8 | 93,728 | 83.93 ± 0.41 | 85.81 ± 0.92 | 56.80 | 0.839 | 35.7 |
+| BasisTabM NoFB | k=2 | 93,732 | 83.37 ± 0.74 | 88.60 ± 1.42 | 60.55 | 0.828 | 34.3 |
+| BasisTabM NoFB+Norm | k=2, BN | 93,638 | 83.27 ± 0.27 | 86.80 ± 0.78 | 58.78 | 0.835 | 37.2 |
+| BasisTabM NoFB+Mix | k=8 | 93,832 | 82.58 ± 0.08 | 81.71 ± 0.59 | 52.99 | 0.854 | 45.9 |
+| BasisTabM NoFB+Mix+Norm | k=4, BN | 94,184 | 79.87 ± 0.58 | 81.42 ± 0.16 | 53.72 | 0.855 | 48.2 |
+| BasisTabM FB | k=4 | 93,512 | 79.76 ± 0.38 | 79.28 ± 0.46 | 51.94 | 0.862 | 36.1 |
+| BasisTabM FB+Norm | k=4, BN | 93,532 | 78.39 ± 0.70 | 77.99 ± 0.88 | 50.91 | 0.867 | 38.5 |
+| BasisTabM FB+Mix | k=8 | 93,784 | 79.26 ± 0.13 | 77.79 ± 0.39 | 49.74 | 0.867 | 45.7 |
+| BasisTabM FB+Mix+Norm | k=4, BN | 93,808 | **76.76 ± 0.17** | **77.11 ± 0.59** | 50.07 | 0.870 | 50.0 |
+
+TabM is reported with dropout 0, like all other models (the earlier dropout-0.1 runs are worse,
+best test RMSE 86.69 at k = 8).
+
+### Weather (univariate OT, L = H = 96; ≈ 50.2K parameters)
+
+| Model | Config | Params | Val RMSE ↓ | Test RMSE ↓ | Test MAE ↓ | Test R² ↑ | Time (s) |
+|---|---|--:|--:|--:|--:|--:|--:|
+| MLP | BN | 50,208 | 12.86 ± 0.07 | 11.91 ± 0.33 | 8.28 | 0.468 | 69.8 |
+| DLinear | univariate | 18,624 | 13.28 ± 0.00 | 13.49 ± 0.05 | 9.30 | 0.317 | 58.8 |
+| BSRBF-KAN | BN | 50,362 | 13.59 ± 0.13 | 12.16 ± 0.16 | 8.59 | 0.445 | 140.6 |
+| EfficientKAN | grid 5 | 49,920 | 13.63 ± 0.06 | 12.14 ± 0.18 | 8.44 | 0.446 | 108.0 |
+| PatchTST | P=16, S=8 | 50,200 | 13.23 ± 0.07 | 12.64 ± 0.07 | 8.69 | 0.400 | 898.8 |
+| TabM | k=4 | 50,056 | 12.77 ± 0.05 | 11.69 ± 0.08 | 8.12 | 0.487 | 66.9 |
+| BasisTabM NoFB | k=2 | 50,274 | 12.77 ± 0.01 | 11.82 ± 0.12 | 8.27 | 0.476 | 64.9 |
+| BasisTabM NoFB+Norm | k=4, BN | 50,124 | **12.69 ± 0.03** | 11.90 ± 0.03 | 8.34 | 0.469 | 71.5 |
+| BasisTabM NoFB+Mix | k=2 | 50,172 | 12.82 ± 0.06 | 11.60 ± 0.13 | 8.14 | 0.495 | 107.9 |
+| BasisTabM NoFB+Mix+Norm | k=4, BN | 50,144 | 12.88 ± 0.02 | 11.84 ± 0.12 | 8.29 | 0.474 | 111.3 |
+| BasisTabM FB | k=8 | 50,168 | 12.79 ± 0.04 | 11.75 ± 0.03 | 8.16 | 0.482 | 73.8 |
+| BasisTabM FB+Norm | k=2, BN | 50,236 | 12.82 ± 0.07 | 12.13 ± 0.41 | 8.44 | 0.447 | 82.8 |
+| BasisTabM FB+Mix | k=2 | 50,148 | 12.88 ± 0.00 | **11.59 ± 0.21** | 8.14 | 0.495 | 105.3 |
+| BasisTabM FB+Mix+Norm | k=4, BN | 50,272 | 12.99 ± 0.07 | 11.97 ± 0.07 | 8.34 | 0.463 | 114.8 |
+
+On Weather most differences are within the seed variation; MLP and BSRBF-KAN with LayerNorm
+collapse (test RMSE ≈ 20.9) and are not selected.
+
+Full per-configuration results (all 81 / 74 configurations, including MAE and R² for every k and
+normalization) are produced by the run scripts in `output/`.
 
 ## License
 
